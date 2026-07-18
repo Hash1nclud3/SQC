@@ -1,0 +1,95 @@
+// Module 95: auto-generated for scanner volume/coverage testing
+const crypto = require('crypto');
+const { exec } = require('child_process');
+const fs = require('fs');
+const axios = require('axios');
+
+// SECURITY:HARDCODED_SECRET
+const API_KEY_95 = "sk_live_FAKEKEY95EXAMPLE00000000000";
+
+// SECURITY:SQLI
+function searchUser_95(db, name) {
+  const query = "SELECT * FROM users WHERE name = '" + name + "'";
+  return db.query(query);
+}
+
+// SECURITY:CMDI
+function pingHost_95(host) {
+  return exec('ping -c 4 ' + host, () => {});
+}
+
+// SECURITY:PATH_TRAVERSAL
+function readUserFile_95(name) {
+  return fs.readFileSync('./uploads/' + name, 'utf8');
+}
+
+// SECURITY:WEAK_CRYPTO
+function hashPassword_95(pw) {
+  return crypto.createHash('md5').update(pw).digest('hex');
+}
+
+// SECURITY:SSRF
+function fetchUrl_95(url) {
+  return axios.get(url);
+}
+
+// SECURITY:INSECURE_RANDOM
+function genToken_95() {
+  return Math.random().toString(36) + Math.random().toString(36);
+}
+
+// BUG:EMPTY_CATCH
+function parseJsonSafe_95(str) {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+  }
+}
+
+// BUG:RESOURCE_LEAK
+function readWithoutClose_95(path) {
+  const fd = fs.openSync(path, 'r');
+  const buf = Buffer.alloc(100);
+  fs.readSync(fd, buf, 0, 100, 0);
+  return buf;
+}
+
+// BUG:UNHANDLED_PROMISE
+function fireAndForget_95(url) {
+  axios.get(url).then(res => res.data);
+}
+
+// SMELL:DEAD_CODE
+// SMELL:UNUSED_VAR
+function deadPath_95() {
+  var unusedVar_95 = 42;
+  if (false) {
+    console.log('never runs 95');
+  }
+  return true;
+}
+
+// SMELL:DEEP_NESTING
+function nestedCalc_95(x) {
+  if (x > 0) {
+    if (x > 10) {
+      if (x > 100) {
+        if (x > 1000) {
+          return x * 0.5;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// SMELL:DUPLICATED_LOGIC
+function calcTax_95(amount) {
+  return amount * 0.08;
+}
+
+module.exports = {
+  searchUser_95, pingHost_95, readUserFile_95, hashPassword_95,
+  fetchUrl_95, genToken_95, parseJsonSafe_95, readWithoutClose_95,
+  fireAndForget_95, deadPath_95, nestedCalc_95, calcTax_95, API_KEY_95
+};

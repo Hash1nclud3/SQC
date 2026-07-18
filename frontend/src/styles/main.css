@@ -1,0 +1,40 @@
+/* Bad code quality examples for SonarQube CSS rules: duplicated selectors, overuse of !important, overly specific selectors */
+
+.header {
+  color: red !important;
+  font-size: 14px !important;
+  margin: 0px !important;
+}
+
+.header {
+  color: blue !important;
+  padding: 10px !important;
+}
+
+.btn {
+  background-color: #ff0000;
+}
+
+.btn {
+  background-color: #00ff00;
+}
+
+div#app > div.container > div.row > div.col > button.btn.btn-primary.btn-lg {
+  color: white !important;
+}
+
+/* empty rule - code smell */
+.unused-class {
+}
+
+.duplicate-1 {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.duplicate-2 {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- VULNERABLE: missing Content-Security-Policy header/meta, missing X-Frame-Options guidance -->
+  <title>Vuln Test App</title>
+  <!-- VULNERABLE: hardcoded API key exposed directly in client-side markup (CWE-798) -->
+  <script>
+    window.__API_KEY__ = "client_ak_live_EXAMPLEFAKEKEY123456";
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>

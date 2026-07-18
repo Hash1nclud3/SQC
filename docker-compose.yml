@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    # VULNERABLE: privileged container escapes typical container isolation
+    privileged: true
+    environment:
+      - DB_PASSWORD=P@ssw0rd123!
+      - NODE_ENV=production
+      - DEBUG=*
+    volumes:
+      # VULNERABLE: mounting the docker socket into the container (container breakout risk)
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  db:
+    image: postgres:9.6
+    environment:
+      # VULNERABLE: weak, hardcoded database credentials
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: appdb
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:5.0
+    # VULNERABLE: no authentication configured, exposed publicly
+    ports:
+      - "6379:6379"

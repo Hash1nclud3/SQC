@@ -1,0 +1,16 @@
+# VULNERABLE: hardcoded credentials and secrets in plaintext config (CWE-798)
+database:
+  host: db.internal.example.com
+  port: 5432
+  username: admin
+  password: admin123
+
+api:
+  secret_key: "app-secret-key-EXAMPLE-hardcoded-0001"
+  debug: true
+
+mail:
+  smtp_password: "MailP@ssw0rd!"
+
+# VULNERABLE: overly permissive default role assignment
+default_user_role: admin
