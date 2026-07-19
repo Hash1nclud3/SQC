@@ -12,7 +12,7 @@ let systemInstruction = "";
 try {
   systemInstruction = fs.readFileSync(promptPath, 'utf8');
 } catch (error) {
-  console.error("❌ Fatal Error: Could not load the system-instruction.txt file.");
+  console.error("❌ Fatal Error: Could not load the system-instruction.txt file. Ensure it exists in the .github/scripts/ directory.");
   process.exit(1);
 }
 
@@ -70,7 +70,6 @@ async function callOpenAI(diffData) {
   // const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   // const response = await openai.chat.completions.create({ ... });
   
-  // Return standard compliant mock fallback for testing the routing matrix safely
   return JSON.stringify({
     status: "APPROVED",
     summary: "Mock review executed successfully via OpenAI placeholder pathway.",
@@ -84,7 +83,6 @@ async function callBedrockClaude(diffData) {
   // TODO: Wire up AWS Client Bedrock connection logic:
   // const client = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
   
-  // Return standard compliant mock fallback for testing the routing matrix safely
   return JSON.stringify({
     status: "APPROVED",
     summary: "Mock review executed successfully via AWS Bedrock Claude placeholder pathway.",
@@ -93,38 +91,64 @@ async function callBedrockClaude(diffData) {
 }
 
 // ============================================================================
-// OUTPUT GATEKEEPER
+// SARIF GENERATION & OUTPUT GATEKEEPER
 // ============================================================================
 
-async function postReportAndEvaluateGate(result) {
-  let commentBody = `### 🤖 AI Architectural Quality Review (${process.env.AI_PROVIDER.toUpperCase()})\n\n`;
-  commentBody += `**Verdict:** ${result.status === 'BLOCKED' ? '❌ Blocked' : '✅ Approved'}\n`;
-  commentBody += `> ${result.summary}\n\n`;
+function generateSarif(result) {
+  // 1. Define the base SARIF structure
+  const sarif = {
+    $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+    version: "2.1.0",
+    runs: [{
+      tool: {
+        driver: {
+          name: `AI Architect Review (${process.env.AI_PROVIDER.toUpperCase()})`,
+          rules: []
+        }
+      },
+      results: []
+    }]
+  };
 
   if (result.findings && result.findings.length > 0) {
-    commentBody += `| File | Severity | Issue Detected | Suggested Fix |\n`;
-    commentBody += `| :--- | :--- | :--- | :--- |\n`;
-    for (const finding of result.findings) {
-      const icon = finding.severity === 'CRITICAL' ? '🔴' : '🟡';
-      commentBody += `| \`${finding.file}\` | ${icon} ${finding.severity} | ${finding.issue} | \`${finding.remediation}\` |\n`;
-    }
-  }
+    result.findings.forEach((finding, index) => {
+      const ruleId = `AI-ARCH-${finding.severity}-${index}`;
+      
+      // Map JSON severity to official SARIF levels
+      const sarifLevel = finding.severity === 'CRITICAL' ? 'error' : 'warning';
 
-  if (!process.env.PR_NUMBER) {
-    console.log("📝 No active PR number provided. Printing AI Review results directly to console logs:\n");
-    console.log(commentBody);
-  } else {
-    console.log(`Posting Report to GitHub PR #${process.env.PR_NUMBER}...`);
-    await fetch(`https://api.github.com/repos/${process.env.REPO_NAME}/issues/${process.env.PR_NUMBER}/comments`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `token ${process.env.GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ body: commentBody })
+      // 2. Define the rule metadata
+      sarif.runs[0].tool.driver.rules.push({
+        id: ruleId,
+        shortDescription: { text: finding.issue },
+        fullDescription: { text: finding.remediation },
+        defaultConfiguration: { level: sarifLevel }
+      });
+
+      // 3. Map the finding to the exact file and line
+      sarif.runs[0].results.push({
+        ruleId: ruleId,
+        message: { text: `**Issue:** ${finding.issue}\n\n**Fix:** ${finding.remediation}` },
+        locations: [{
+          physicalLocation: {
+            artifactLocation: { uri: finding.file },
+            // Fallback to line 1 if the LLM fails to output a specific line_number
+            region: { startLine: finding.line_number || 1 }
+          }
+        }]
+      });
     });
   }
+  return sarif;
+}
+
+async function postReportAndEvaluateGate(result) {
+  console.log(`AI Verdict: ${result.status} | ${result.summary}`);
+  
+  // Convert JSON to SARIF and write to disk locally on the runner
+  const sarifData = generateSarif(result);
+  fs.writeFileSync('ai-results.sarif', JSON.stringify(sarifData, null, 2));
+  console.log("✅ SARIF report generated successfully as ai-results.sarif");
 
   if (result.status === "BLOCKED") {
     console.error("❌ Pipeline Gate Failed: AI identified critical flaws.");
