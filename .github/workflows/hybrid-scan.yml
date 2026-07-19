@@ -1,0 +1,80 @@
+name: Hybrid Code Quality Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      ai_provider:
+        description: 'Select the AI Provider to execute architectural validation'
+        required: true
+        default: 'gemini'
+        type: choice
+        options:
+          - gemini
+          - openai
+          - bedrock
+      pr_number:
+        description: 'Optional PR Number (Leaves a comment on the PR if provided)'
+        required: false
+        type: string
+
+jobs:
+  hybrid-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Modified to install all prospective SDK packages as well
+      - name: Install LLM Core Libraries
+        run: npm install @google/genai openai @aws-sdk/client-bedrock-runtime
+
+      # ------------------------------------------------------------
+      # STATIC BASELINE SCAN (SonarCloud)
+      # ------------------------------------------------------------
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # ------------------------------------------------------------
+      # INTELLIGENT EXPERT REVIEW (Multi-LLM Layer)
+      # ------------------------------------------------------------
+      - name: Extract Target Git Diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr_changes.diff
+          else
+            git diff origin/main...HEAD > pr_changes.diff
+          fi
+
+      - name: Execute Multi-LLM AI Evaluation
+        if: success()
+        env:
+          # Dynamic Selection Parameter (Defaults to gemini on automatic PRs)
+          AI_PROVIDER: ${{ github.event.inputs.ai_provider || 'gemini' }}
+          
+          # Secrets and Placeholders passed to the engine
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+          
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          REPO_NAME: ${{ github.repository }}
+        run: node .github/scripts/hybrid-orchestrator.js
