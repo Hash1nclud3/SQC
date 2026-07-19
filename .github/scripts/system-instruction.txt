@@ -40,7 +40,7 @@ Return ONLY a single JSON object. No markdown code fences, no prose before or af
   "findings": [
     {
       "file": "path/to/file.js",
-      "line": 42,
+      "line_number": "line number where this was found",
       "severity": "CRITICAL" or "ADVISORY",
       "issue": "Specific description referencing the actual code pattern seen, not a generic category label",
       "remediation": "Concrete, actionable fix — a code-level suggestion, not general advice"
