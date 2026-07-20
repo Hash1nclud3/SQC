@@ -8,12 +8,12 @@ let systemInstruction = "";
 try {
   systemInstruction = fs.readFileSync(promptPath, 'utf8');
 } catch (error) {
-  console.error("❌ Fatal Error: Could not load the system-instruction.txt file.");
+  console.error("❌ Fatal Error: Could not load system-instruction.txt file.");
   process.exit(1);
 }
 
 // ----------------------------------------------------------------------------
-// UTILITY: RECURSIVE FILE SEARCH
+// UTILITY: RECURSIVE FILE SEARCH (FULL REPO SCAN)
 // ----------------------------------------------------------------------------
 function getAllFiles(dir, fileList = []) {
   const files = fs.readdirSync(dir);
@@ -39,7 +39,6 @@ function getAllFiles(dir, fileList = []) {
 async function fetchSonarIssues() {
   const projectKey = process.env.SONAR_PROJECT_KEY;
   const token = process.env.SONAR_TOKEN;
-  // Fallback to ref_name if it's a manual branch run instead of a PR
   const branch = process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME;
 
   if (!projectKey || !token) {
@@ -47,14 +46,14 @@ async function fetchSonarIssues() {
     return [];
   }
 
-  console.log("⏳ Waiting 15 seconds for SonarCloud background processing to complete...");
+  console.log("⏳ Waiting 15 seconds for SonarCloud background analysis processing...");
   await new Promise(r => setTimeout(r, 15000));
 
   const auth = Buffer.from(`${token}:`).toString('base64');
   const url = `https://sonarcloud.io/api/issues/search?componentKeys=${projectKey}&branch=${branch}&resolved=false`;
 
   try {
-    console.log(`📡 Fetching SonarCloud issues from API for branch: ${branch}`);
+    console.log(`📡 Fetching SonarCloud issues from API for project: ${projectKey} (Branch: ${branch})`);
     const res = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -75,44 +74,52 @@ async function run() {
   let aiPromptPrefix = '';
 
   if (scanMode === 'full') {
-    console.log("📦 FULL REPO SCAN INITIATED.");
+    console.log("📦 FULL REPO SCAN INITIATED. Gathering source files...");
     const files = getAllFiles('.');
-    if (files.length === 0) return finalizeAndExit({ status: "APPROVED", summary: "No files found.", findings: [] });
+    if (files.length === 0) {
+      console.log("⚠️ No matching source files found.");
+      return await finalizeAndExit({ status: "APPROVED", summary: "No source files found to scan.", findings: [] });
+    }
 
     for (const file of files) {
       payloadData += `\n\n--- FILE: ${file} ---\n${fs.readFileSync(file, 'utf8')}`;
     }
     aiPromptPrefix = "Analyze this entire codebase for architectural flaws and vulnerabilities:\n\n";
   } else {
+    // Diff Mode
     if (!fs.existsSync('pr_changes.diff') || fs.statSync('pr_changes.diff').size === 0) {
-      console.log("⚠️ No diff payload found.");
-      return finalizeAndExit({ status: "APPROVED", summary: "No code changes detected.", findings: [] });
+      console.log("⚠️ No diff payload found. Skipping AI scan.");
+      return await finalizeAndExit({ status: "APPROVED", summary: "No code changes detected in this run.", findings: [] });
     }
     payloadData = fs.readFileSync('pr_changes.diff', 'utf8');
     aiPromptPrefix = "Analyze this git diff for architectural flaws and vulnerabilities:\n\n";
   }
 
-  // 1. Fetch AI Findings
+  console.log(`🚀 Running architectural scan using provider: ${provider} | Mode: ${scanMode}`);
+
   let rawJsonResult = '';
   if (provider === 'gemini') {
     rawJsonResult = await callGemini(payloadData, aiPromptPrefix);
+  } else if (provider === 'openai') {
+    rawJsonResult = await callOpenAI(payloadData, aiPromptPrefix);
+  } else if (provider === 'bedrock') {
+    rawJsonResult = await callBedrockClaude(payloadData, aiPromptPrefix);
   } else {
-    rawJsonResult = JSON.stringify({ status: "APPROVED", summary: `Mock ${provider} review executed.`, findings: [] });
+    throw new Error(`Unsupported AI Engine routing provider: ${provider}`);
   }
-  const aiResult = JSON.parse(rawJsonResult.trim());
 
-  // 2. Execute Output Pipeline
+  const aiResult = JSON.parse(rawJsonResult.trim());
   await finalizeAndExit(aiResult);
 }
 
 // ----------------------------------------------------------------------------
-// ENGINES
+// AI PROVIDERS
 // ----------------------------------------------------------------------------
 async function callGemini(payloadData, prefix) {
   console.log("Processing via Gemini AI Studio...");
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const response = await ai.models.generateContent({
-    model: 'gemini-3.5-flash', 
+    model: 'gemini-3.5-flash',
     contents: [{ role: 'user', parts: [{ text: `${prefix}${payloadData}` }] }],
     config: {
       systemInstruction: systemInstruction,
@@ -123,18 +130,28 @@ async function callGemini(payloadData, prefix) {
   return response.text;
 }
 
+async function callOpenAI(payloadData, prefix) {
+  console.log("🛰️ OpenAI Routing Engaged (PLACEHOLDER)");
+  return JSON.stringify({ status: "APPROVED", summary: "Mock OpenAI review completed.", findings: [] });
+}
+
+async function callBedrockClaude(payloadData, prefix) {
+  console.log("🛰️ AWS Bedrock Claude Routing Engaged (PLACEHOLDER)");
+  return JSON.stringify({ status: "APPROVED", summary: "Mock Bedrock review completed.", findings: [] });
+}
+
 // ----------------------------------------------------------------------------
 // SARIF COMPILATION & OUTPUT
 // ----------------------------------------------------------------------------
 async function finalizeAndExit(aiResult) {
   console.log(`AI Verdict: ${aiResult.status} | ${aiResult.summary}`);
   
-  // Fetch Sonar findings to merge
+  // Fetch Sonar issues to merge into SARIF
   const sonarIssues = await fetchSonarIssues();
   
   const sarifData = generateCombinedSarif(aiResult, sonarIssues);
   fs.writeFileSync('ai-results.sarif', JSON.stringify(sarifData, null, 2));
-  console.log("✅ Combined Multi-Tool SARIF report generated successfully.");
+  console.log("✅ Combined Multi-Tool SARIF report generated successfully as ai-results.sarif");
 
   if (aiResult.status === "BLOCKED") {
     console.error("❌ Pipeline Gate Failed: AI identified critical flaws.");
@@ -148,7 +165,7 @@ function generateCombinedSarif(aiResult, sonarIssues) {
   const sarif = {
     $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
     version: "2.1.0",
-    runs: [] // We will push a separate run object for each tool
+    runs: []
   };
 
   // --- RUN 1: AI ARCHITECT ---
@@ -191,14 +208,10 @@ function generateCombinedSarif(aiResult, sonarIssues) {
     };
 
     sonarIssues.forEach((issue) => {
-      // Sonar returns components like "my-project-key:src/auth.js". We just want the file path.
       const filePath = issue.component.includes(':') ? issue.component.split(':').pop() : issue.component;
       const ruleId = issue.rule;
-      
-      // Map Sonar Severities (BLOCKER, CRITICAL, MAJOR, etc.) to SARIF
       const sarifLevel = (issue.severity === 'BLOCKER' || issue.severity === 'CRITICAL') ? 'error' : 'warning';
 
-      // Avoid duplicating rules if multiple issues share the same rule
       if (!sonarRun.tool.driver.rules.find(r => r.id === ruleId)) {
         sonarRun.tool.driver.rules.push({
           id: ruleId,
@@ -224,7 +237,15 @@ function generateCombinedSarif(aiResult, sonarIssues) {
   return sarif;
 }
 
+// ----------------------------------------------------------------------------
+// SAFE ERROR CATCHER
+// ----------------------------------------------------------------------------
 run().catch(err => {
   console.error("Fatal Error:", err);
+  const errorSarif = generateCombinedSarif(
+    { status: "BLOCKED", summary: "Pipeline failed to execute AI scan. Check Actions logs.", findings: [] },
+    []
+  );
+  fs.writeFileSync('ai-results.sarif', JSON.stringify(errorSarif, null, 2));
   process.exit(1);
 });
