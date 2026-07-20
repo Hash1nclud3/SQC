@@ -1,0 +1,13 @@
+name: "Code Quality Only"
+
+# 1. Disable the default security-focused query suite
+disable-default-queries: true
+
+# 2. Opt into the expanded suite that contains both security AND quality queries
+queries:
+  - uses: security-and-quality
+
+# 3. Filter out all security-related rules, leaving only maintainability and reliability
+query-filters:
+  - exclude:
+      tags contain: security
