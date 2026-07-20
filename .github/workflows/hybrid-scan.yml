@@ -3,7 +3,6 @@ name: Hybrid Code Quality Pipeline
 on:
   pull_request:
     types: [opened, synchronize]
-  # Enables the "Run workflow" manual button in the GitHub Actions UI
   workflow_dispatch:
     inputs:
       ai_provider:
@@ -15,15 +14,19 @@ on:
           - gemini
           - openai
           - bedrock
+      scan_mode:
+        description: 'Scan Mode: Diff (PR changes only) or Full (Entire Repository)'
+        required: true
+        default: 'diff'
+        type: choice
+        options:
+          - diff
+          - full
       run_sonar:
         description: 'Execute SonarCloud baseline scan?'
         required: true
         type: boolean
         default: false
-      pr_number:
-        description: 'Optional PR Number (Leaves a comment on the PR if provided)'
-        required: false
-        type: string
 
 jobs:
   hybrid-review:
@@ -31,7 +34,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      # REQUIRED TO POST TO THE NATIVE GITHUB SECURITY TAB
       security-events: write 
 
     steps:
@@ -49,10 +51,22 @@ jobs:
         run: npm install @google/genai openai @aws-sdk/client-bedrock-runtime
 
       # ------------------------------------------------------------
-      # STATIC BASELINE SCAN (SonarCloud)
+      # CODEQL - NATIVE GITHUB SAST
+      # ------------------------------------------------------------
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript # Update this if you are using python, java, etc.
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
+
+      # ------------------------------------------------------------
+      # SONARCLOUD SCAN (Asynchronous)
       # ------------------------------------------------------------
       - name: SonarCloud Scan
-        # Runs automatically on PRs, or manually if the box is checked in the UI
         if: ${{ github.event_name == 'pull_request' || inputs.run_sonar == true }}
         uses: SonarSource/sonarcloud-github-action@master
         env:
@@ -62,7 +76,7 @@ jobs:
       # ------------------------------------------------------------
       # INTELLIGENT EXPERT REVIEW (Multi-LLM Layer)
       # ------------------------------------------------------------
-      - name: Extract Target Git Diff
+      - name: Extract Target Git Diff (If Diff Mode)
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr_changes.diff
@@ -70,27 +84,27 @@ jobs:
             git diff origin/main...HEAD > pr_changes.diff
           fi
 
-      - name: Execute Multi-LLM AI Evaluation
+      - name: Execute Multi-LLM AI Evaluation & Fetch Sonar API
         if: success()
         env:
           AI_PROVIDER: ${{ github.event.inputs.ai_provider || 'gemini' }}
+          SCAN_MODE: ${{ github.event.inputs.scan_mode || 'diff' }} 
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-          REPO_NAME: ${{ github.repository }}
+          # Need these variables for the SonarCloud API fetch:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: 'your-sonar-project-key' # ⚠️ REPLACE THIS with your actual Sonar project key
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: node .github/scripts/hybrid-orchestrator.js
 
-      # ------------------------------------------------------------
-      # SECURITY DASHBOARD INTEGRATION
-      # ------------------------------------------------------------
-      - name: Upload AI Results to GitHub Security Tab
+      - name: Upload Combined AI & Sonar Results to GitHub Security Tab
         uses: github/codeql-action/upload-sarif@v3
-        # Use always() to upload the SARIF report even if the script exited with code 1 (BLOCKED)
         if: always()
         with:
           sarif_file: ai-results.sarif
-          category: AI-Architect-Review
+          category: Hybrid-Review-Engine
