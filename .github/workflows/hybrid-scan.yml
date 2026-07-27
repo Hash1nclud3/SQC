@@ -127,7 +127,7 @@ jobs:
           category: Hybrid-Review-Engine
 
       # ------------------------------------------------------------
-      # PUBLISH AI TRIAGE SUMMARY
+      # PUBLISH AI TRIAGE SUMMARY & METRICS
       # ------------------------------------------------------------
       - name: Publish AI Triage Report to Job Summary
         if: always()
