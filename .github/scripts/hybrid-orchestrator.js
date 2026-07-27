@@ -13,6 +13,15 @@ try {
 }
 
 // ----------------------------------------------------------------------------
+// GLOBAL METRICS TRACKER
+// ----------------------------------------------------------------------------
+const scanMetrics = {
+  linesOfCode: 0,
+  fileTypes: {},
+  tokensConsumed: 0
+};
+
+// ----------------------------------------------------------------------------
 // UTILITY: RECURSIVE FILE SEARCH (FULL REPO SCAN)
 // ----------------------------------------------------------------------------
 function getAllFiles(dir, fileList = []) {
@@ -41,7 +50,6 @@ async function clusterSastWithAI(sonarIssues) {
 
   console.log(`🧠 Sending ${sonarIssues.length} Sonar issues to AI for deduplication...`);
   
-  // Strip down the payload to save API tokens
   const compactIssues = sonarIssues.map(i => ({
     issue: i.message,
     file: i.component.includes(':') ? i.component.split(':').pop() : i.component,
@@ -77,6 +85,9 @@ RAW SAST FINDINGS:
       }
     });
     
+    // ⬇️ Track tokens for the triage phase
+    scanMetrics.tokensConsumed += (response.usageMetadata?.totalTokenCount || 0);
+    
     return JSON.parse(response.text.trim());
   } catch (error) {
     console.error("⚠️ AI Triage failed. Skipping deduplication report.", error.message);
@@ -84,8 +95,8 @@ RAW SAST FINDINGS:
   }
 }
 
-function writeTriageSummary(clusteredIssues) {
-  if (!clusteredIssues || clusteredIssues.length === 0) return;
+function generateTriageMarkdown(clusteredIssues) {
+  if (!clusteredIssues || clusteredIssues.length === 0) return '';
 
   let markdown = `## 🧠 AI Triage Report: Grouped SAST Findings\n\n`;
   markdown += `Gemini analyzed the raw deterministic scan results and clustered them into the following unique architectural themes:\n\n`;
@@ -101,8 +112,23 @@ function writeTriageSummary(clusteredIssues) {
     markdown += `\n---\n`;
   });
 
-  fs.writeFileSync('ai-triage-report.md', markdown);
-  console.log("✅ AI Triage Markdown report generated successfully.");
+  return markdown;
+}
+
+function generateMetricsMarkdown() {
+  let markdown = `\n## 📊 Scan Execution Metrics\n\n`;
+  markdown += `- **Lines of Code Scanned:** ${scanMetrics.linesOfCode}\n`;
+  markdown += `- **AI Tokens Consumed:** ${scanMetrics.tokensConsumed}\n`;
+  markdown += `- **Files Scanned by Type:**\n`;
+
+  if (Object.keys(scanMetrics.fileTypes).length === 0) {
+    markdown += `  - N/A\n`;
+  } else {
+    for (const [ext, count] of Object.entries(scanMetrics.fileTypes)) {
+      markdown += `  - \`${ext || 'No Extension'}\`: ${count} file(s)\n`;
+    }
+  }
+  return markdown;
 }
 
 // ----------------------------------------------------------------------------
@@ -158,7 +184,14 @@ async function run() {
     }
 
     for (const file of files) {
-      payloadData += `\n\n--- FILE: ${file} ---\n${fs.readFileSync(file, 'utf8')}`;
+      const content = fs.readFileSync(file, 'utf8');
+      
+      // ⬇️ Collect Metrics for Full Scan
+      scanMetrics.linesOfCode += content.split('\n').length;
+      const ext = path.extname(file) || 'no-extension';
+      scanMetrics.fileTypes[ext] = (scanMetrics.fileTypes[ext] || 0) + 1;
+      
+      payloadData += `\n\n--- FILE: ${file} ---\n${content}`;
     }
     aiPromptPrefix = "Analyze this entire codebase for architectural flaws and vulnerabilities:\n\n";
   } else {
@@ -166,7 +199,20 @@ async function run() {
       console.log("⚠️ No diff payload found. Skipping AI scan.");
       return await finalizeAndExit({ status: "APPROVED", summary: "No code changes detected in this run.", findings: [] });
     }
+    
     payloadData = fs.readFileSync('pr_changes.diff', 'utf8');
+    const diffLines = payloadData.split('\n');
+    
+    // ⬇️ Collect Metrics for Diff Scan
+    scanMetrics.linesOfCode = diffLines.length;
+    for (const line of diffLines) {
+      if (line.startsWith('+++ b/')) {
+        const filepath = line.substring(6);
+        const ext = path.extname(filepath) || 'no-extension';
+        scanMetrics.fileTypes[ext] = (scanMetrics.fileTypes[ext] || 0) + 1;
+      }
+    }
+    
     aiPromptPrefix = "Analyze this git diff for architectural flaws and vulnerabilities:\n\n";
   }
 
@@ -175,7 +221,9 @@ async function run() {
   let rawJsonResult = '';
   try {
     if (provider === 'gemini') {
-      rawJsonResult = await callGemini(payloadData, aiPromptPrefix);
+      const aiResponse = await callGemini(payloadData, aiPromptPrefix);
+      rawJsonResult = aiResponse.text;
+      scanMetrics.tokensConsumed += aiResponse.tokens;
     } else {
       rawJsonResult = JSON.stringify({ status: "APPROVED", summary: `Mock ${provider} review executed.`, findings: [] });
     }
@@ -215,7 +263,9 @@ async function callGemini(payloadData, prefix) {
     });
     
     console.log("✅ AI engine successfully returned a response payload.");
-    return response.text;
+    // Return both the text output and the token count for metrics tracking
+    const tokens = response.usageMetadata?.totalTokenCount || 0;
+    return { text: response.text, tokens: tokens };
   } catch (error) {
     console.error("❌ AI API Request Failed:", error.message);
     throw error;
@@ -228,16 +278,20 @@ async function callGemini(payloadData, prefix) {
 async function finalizeAndExit(aiResult) {
   console.log(`AI Verdict: ${aiResult.status} | ${aiResult.summary}`);
   
-  // Fetch raw Sonar issues
+  // 1. Fetch raw Sonar issues
   const sonarIssues = await fetchSonarIssues();
   
-  // Let AI Triage and cluster the raw issues
+  // 2. Generate Summary Reports (Triage + Metrics)
+  let finalMarkdown = '';
   if (sonarIssues.length > 0) {
     const clusteredIssues = await clusterSastWithAI(sonarIssues);
-    writeTriageSummary(clusteredIssues);
+    finalMarkdown += generateTriageMarkdown(clusteredIssues);
   }
+  finalMarkdown += generateMetricsMarkdown();
+  fs.writeFileSync('ai-triage-report.md', finalMarkdown);
+  console.log("✅ Pipeline execution metrics and AI summary generated.");
   
-  // Generate the standard SARIF for the Security Tab
+  // 3. Generate the standard SARIF for the Security Tab
   const sarifData = generateCombinedSarif(aiResult, sonarIssues);
   fs.writeFileSync('ai-results.sarif', JSON.stringify(sarifData, null, 2));
   console.log("✅ Combined Multi-Tool SARIF report generated successfully as ai-results.sarif");
@@ -272,16 +326,19 @@ function generateCombinedSarif(aiResult, sonarIssues) {
         parsedLineNumber = 1;
       }
 
+      const shortTitle = finding.title || "Architectural Flaw Detected";
+      const detailedDesc = finding.description || finding.issue || "No detailed description provided.";
+
       aiRun.tool.driver.rules.push({
         id: ruleId,
-        shortDescription: { text: finding.issue },
-        fullDescription: { text: finding.remediation },
+        shortDescription: { text: shortTitle },
+        fullDescription: { text: detailedDesc },
         defaultConfiguration: { level: sarifLevel }
       });
 
       aiRun.results.push({
         ruleId: ruleId,
-        message: { text: `**[AI Scan] Issue:** ${finding.issue}\n\n**Fix:** ${finding.remediation}` },
+        message: { text: `**[AI Scan] ${shortTitle}**\n\n**Details:**\n${detailedDesc}\n\n**Fix:**\n${finding.remediation}` },
         locations: [{
           physicalLocation: {
             artifactLocation: { uri: finding.file },
