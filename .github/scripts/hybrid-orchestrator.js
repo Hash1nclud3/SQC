@@ -46,18 +46,27 @@ async function fetchSonarIssues() {
     return [];
   }
 
-  console.log("⏳ Waiting 15 seconds for SonarCloud background analysis processing...");
-  await new Promise(r => setTimeout(r, 15000));
+  // ⬇️ INCREASED TIMER TO 45 SECONDS ⬇️
+  console.log("⏳ Waiting 45 seconds for SonarCloud background analysis processing...");
+  await new Promise(r => setTimeout(r, 45000));
 
   const auth = Buffer.from(`${token}:`).toString('base64');
+  
+  // Note: If you use self-hosted SonarQube, change this URL to your company's instance!
   const url = `https://sonarcloud.io/api/issues/search?componentKeys=${projectKey}&branch=${branch}&resolved=false`;
 
   try {
     console.log(`📡 Fetching SonarCloud issues from API for project: ${projectKey} (Branch: ${branch})`);
     const res = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    
     const data = await res.json();
-    return data.issues || [];
+    const issues = data.issues || [];
+    
+    // ⬇️ ADDED VISIBLE LOGGING TO PROVE WHAT WAS FETCHED ⬇️
+    console.log(`✅ Sonar API successfully returned ${issues.length} issues.`);
+    
+    return issues;
   } catch (e) {
     console.error("❌ Failed to fetch Sonar issues:", e.message);
     return [];
