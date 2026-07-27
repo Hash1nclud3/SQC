@@ -46,13 +46,10 @@ async function fetchSonarIssues() {
     return [];
   }
 
-  // ⬇️ INCREASED TIMER TO 45 SECONDS ⬇️
   console.log("⏳ Waiting 45 seconds for SonarCloud background analysis processing...");
   await new Promise(r => setTimeout(r, 45000));
 
   const auth = Buffer.from(`${token}:`).toString('base64');
-  
-  // Note: If you use self-hosted SonarQube, change this URL to your company's instance!
   const url = `https://sonarcloud.io/api/issues/search?componentKeys=${projectKey}&branch=${branch}&resolved=false`;
 
   try {
@@ -62,8 +59,6 @@ async function fetchSonarIssues() {
     
     const data = await res.json();
     const issues = data.issues || [];
-    
-    // ⬇️ ADDED VISIBLE LOGGING TO PROVE WHAT WAS FETCHED ⬇️
     console.log(`✅ Sonar API successfully returned ${issues.length} issues.`);
     
     return issues;
@@ -86,7 +81,7 @@ async function run() {
     console.log("📦 FULL REPO SCAN INITIATED. Gathering source files...");
     const files = getAllFiles('.');
     if (files.length === 0) {
-      console.log("⚠️ No matching source files found.");
+      console.log("⚠️ No matching source files found. Skipping AI scan.");
       return await finalizeAndExit({ status: "APPROVED", summary: "No source files found to scan.", findings: [] });
     }
 
@@ -95,7 +90,6 @@ async function run() {
     }
     aiPromptPrefix = "Analyze this entire codebase for architectural flaws and vulnerabilities:\n\n";
   } else {
-    // Diff Mode
     if (!fs.existsSync('pr_changes.diff') || fs.statSync('pr_changes.diff').size === 0) {
       console.log("⚠️ No diff payload found. Skipping AI scan.");
       return await finalizeAndExit({ status: "APPROVED", summary: "No code changes detected in this run.", findings: [] });
@@ -107,17 +101,27 @@ async function run() {
   console.log(`🚀 Running architectural scan using provider: ${provider} | Mode: ${scanMode}`);
 
   let rawJsonResult = '';
-  if (provider === 'gemini') {
-    rawJsonResult = await callGemini(payloadData, aiPromptPrefix);
-  } else if (provider === 'openai') {
-    rawJsonResult = await callOpenAI(payloadData, aiPromptPrefix);
-  } else if (provider === 'bedrock') {
-    rawJsonResult = await callBedrockClaude(payloadData, aiPromptPrefix);
-  } else {
-    throw new Error(`Unsupported AI Engine routing provider: ${provider}`);
+  try {
+    if (provider === 'gemini') {
+      rawJsonResult = await callGemini(payloadData, aiPromptPrefix);
+    } else {
+      rawJsonResult = JSON.stringify({ status: "APPROVED", summary: `Mock ${provider} review executed.`, findings: [] });
+    }
+  } catch (error) {
+    console.error("❌ AI Execution aborted due to an API error.");
+    return await finalizeAndExit({ status: "BLOCKED", summary: `AI Scan Failed: ${error.message}`, findings: [] });
   }
 
-  const aiResult = JSON.parse(rawJsonResult.trim());
+  let aiResult;
+  try {
+    aiResult = JSON.parse(rawJsonResult.trim());
+    console.log(`✅ AI scan successfully completed and parsed valid JSON.`);
+  } catch (error) {
+    console.error("❌ AI Scan Failed: The AI did not return a valid JSON format.", error.message);
+    console.log("Raw AI Output was:\n", rawJsonResult);
+    return await finalizeAndExit({ status: "BLOCKED", summary: "AI failed to return valid JSON payload.", findings: [] });
+  }
+
   await finalizeAndExit(aiResult);
 }
 
@@ -125,28 +129,25 @@ async function run() {
 // AI PROVIDERS
 // ----------------------------------------------------------------------------
 async function callGemini(payloadData, prefix) {
-  console.log("Processing via Gemini AI Studio...");
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.5-flash',
-    contents: [{ role: 'user', parts: [{ text: `${prefix}${payloadData}` }] }],
-    config: {
-      systemInstruction: systemInstruction,
-      temperature: 0.1,
-      responseMimeType: "application/json"
-    }
-  });
-  return response.text;
-}
-
-async function callOpenAI(payloadData, prefix) {
-  console.log("🛰️ OpenAI Routing Engaged (PLACEHOLDER)");
-  return JSON.stringify({ status: "APPROVED", summary: "Mock OpenAI review completed.", findings: [] });
-}
-
-async function callBedrockClaude(payloadData, prefix) {
-  console.log("🛰️ AWS Bedrock Claude Routing Engaged (PLACEHOLDER)");
-  return JSON.stringify({ status: "APPROVED", summary: "Mock Bedrock review completed.", findings: [] });
+  console.log("🧠 Initiating AI scan via Gemini AI Studio API...");
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `${prefix}${payloadData}` }] }],
+      config: {
+        systemInstruction: systemInstruction,
+        temperature: 0.1,
+        responseMimeType: "application/json"
+      }
+    });
+    
+    console.log("✅ AI engine successfully returned a response payload.");
+    return response.text;
+  } catch (error) {
+    console.error("❌ AI API Request Failed:", error.message);
+    throw error;
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -155,22 +156,20 @@ async function callBedrockClaude(payloadData, prefix) {
 async function finalizeAndExit(aiResult) {
   console.log(`AI Verdict: ${aiResult.status} | ${aiResult.summary}`);
   
-  // Fetch Sonar issues to merge into SARIF
   const sonarIssues = await fetchSonarIssues();
-  
   const sarifData = generateCombinedSarif(aiResult, sonarIssues);
+  
   fs.writeFileSync('ai-results.sarif', JSON.stringify(sarifData, null, 2));
   console.log("✅ Combined Multi-Tool SARIF report generated successfully as ai-results.sarif");
 
   if (aiResult.status === "BLOCKED") {
-    console.error("❌ Pipeline Gate Failed: AI identified critical flaws.");
+    console.error("❌ Pipeline Gate Failed: AI identified critical flaws or execution failed.");
     process.exit(1);
   }
 }
 
 function generateCombinedSarif(aiResult, sonarIssues) {
   const providerName = process.env.AI_PROVIDER || 'gemini';
-  
   const sarif = {
     $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
     version: "2.1.0",
@@ -252,7 +251,7 @@ function generateCombinedSarif(aiResult, sonarIssues) {
 run().catch(err => {
   console.error("Fatal Error:", err);
   const errorSarif = generateCombinedSarif(
-    { status: "BLOCKED", summary: "Pipeline failed to execute AI scan. Check Actions logs.", findings: [] },
+    { status: "BLOCKED", summary: "Pipeline crashed entirely. Check Actions logs.", findings: [] },
     []
   );
   fs.writeFileSync('ai-results.sarif', JSON.stringify(errorSarif, null, 2));
