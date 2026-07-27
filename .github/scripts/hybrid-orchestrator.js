@@ -187,6 +187,12 @@ function generateCombinedSarif(aiResult, sonarIssues) {
       const ruleId = `AI-ARCH-${finding.severity}-${index}`;
       const sarifLevel = finding.severity === 'CRITICAL' ? 'error' : 'warning';
 
+      // ⬇️ THE FIX: Force the line number to be a strict integer ⬇️
+      let parsedLineNumber = parseInt(finding.line_number, 10);
+      if (isNaN(parsedLineNumber) || parsedLineNumber < 1) {
+        parsedLineNumber = 1; // Fallback to line 1 if the AI provided a string or null
+      }
+
       aiRun.tool.driver.rules.push({
         id: ruleId,
         shortDescription: { text: finding.issue },
@@ -200,7 +206,8 @@ function generateCombinedSarif(aiResult, sonarIssues) {
         locations: [{
           physicalLocation: {
             artifactLocation: { uri: finding.file },
-            region: { startLine: finding.line_number || 1 }
+            // ⬇️ Use the safely parsed integer here ⬇️
+            region: { startLine: parsedLineNumber } 
           }
         }]
       });
