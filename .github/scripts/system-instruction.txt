@@ -36,14 +36,15 @@ Return ONLY a single JSON object. No markdown code fences, no prose before or af
 
 {
   "status": "BLOCKED" or "APPROVED",
-  "summary": "1-2 sentence plain-language summary of overall diff quality",
+  "summary": "Overall assessment of the scan",
   "findings": [
     {
+      "title": "A short, concise name for the issue (MAX 50 CHARACTERS). Example: 'Unhandled Promise Rejection'",
+      "description": "The full, detailed explanation of the issue, affected functions, and the risk it poses.",
+      "remediation": "Step-by-step instructions on how to fix the flaw.",
+      "severity": "CRITICAL, HIGH, MEDIUM, or LOW",
       "file": "path/to/file.js",
-      "line_number": "line number where this was found",
-      "severity": "CRITICAL" or "ADVISORY",
-      "issue": "Specific description referencing the actual code pattern seen, not a generic category label",
-      "remediation": "Concrete, actionable fix — a code-level suggestion, not general advice"
+      "line_number": 15
     }
   ]
 }
