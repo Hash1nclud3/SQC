@@ -34,6 +34,78 @@ function getAllFiles(dir, fileList = []) {
 }
 
 // ----------------------------------------------------------------------------
+// AI SAST TRIAGE & DEDUPLICATION
+// ----------------------------------------------------------------------------
+async function clusterSastWithAI(sonarIssues) {
+  if (!sonarIssues || sonarIssues.length === 0) return [];
+
+  console.log(`🧠 Sending ${sonarIssues.length} Sonar issues to AI for deduplication...`);
+  
+  // Strip down the payload to save API tokens
+  const compactIssues = sonarIssues.map(i => ({
+    issue: i.message,
+    file: i.component.includes(':') ? i.component.split(':').pop() : i.component,
+    line: i.textRange ? i.textRange.startLine : 1
+  }));
+
+  const triagePrompt = `You are an expert AppSec triage agent. 
+I am providing you with raw SAST findings from deterministic tools. 
+Your job is to reduce alert fatigue by clustering them by unique vulnerability type.
+
+Return a strict JSON array of objects using this exact schema:
+[
+  {
+    "finding_type": "string (e.g., Missing Null Checks, Resource Leaks)",
+    "root_cause_summary": "string (1-2 sentences explaining why this happens and how to fix it broadly)",
+    "instances": [
+      { "file": "string", "line": number }
+    ]
+  }
+]
+
+RAW SAST FINDINGS:
+`;
+
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `${triagePrompt}${JSON.stringify(compactIssues)}` }] }],
+      config: {
+        temperature: 0.1,
+        responseMimeType: "application/json"
+      }
+    });
+    
+    return JSON.parse(response.text.trim());
+  } catch (error) {
+    console.error("⚠️ AI Triage failed. Skipping deduplication report.", error.message);
+    return [];
+  }
+}
+
+function writeTriageSummary(clusteredIssues) {
+  if (!clusteredIssues || clusteredIssues.length === 0) return;
+
+  let markdown = `## 🧠 AI Triage Report: Grouped SAST Findings\n\n`;
+  markdown += `Gemini analyzed the raw deterministic scan results and clustered them into the following unique architectural themes:\n\n`;
+
+  clusteredIssues.forEach(cluster => {
+    markdown += `### 🚨 ${cluster.finding_type}\n`;
+    markdown += `**Analysis:** ${cluster.root_cause_summary}\n\n`;
+    markdown += `**Affected Locations (${cluster.instances.length}):**\n`;
+    
+    cluster.instances.forEach(instance => {
+      markdown += `- \`${instance.file}\` (Line ${instance.line})\n`;
+    });
+    markdown += `\n---\n`;
+  });
+
+  fs.writeFileSync('ai-triage-report.md', markdown);
+  console.log("✅ AI Triage Markdown report generated successfully.");
+}
+
+// ----------------------------------------------------------------------------
 // SONARCLOUD API INTEGRATION
 // ----------------------------------------------------------------------------
 async function fetchSonarIssues() {
@@ -156,9 +228,17 @@ async function callGemini(payloadData, prefix) {
 async function finalizeAndExit(aiResult) {
   console.log(`AI Verdict: ${aiResult.status} | ${aiResult.summary}`);
   
+  // Fetch raw Sonar issues
   const sonarIssues = await fetchSonarIssues();
-  const sarifData = generateCombinedSarif(aiResult, sonarIssues);
   
+  // Let AI Triage and cluster the raw issues
+  if (sonarIssues.length > 0) {
+    const clusteredIssues = await clusterSastWithAI(sonarIssues);
+    writeTriageSummary(clusteredIssues);
+  }
+  
+  // Generate the standard SARIF for the Security Tab
+  const sarifData = generateCombinedSarif(aiResult, sonarIssues);
   fs.writeFileSync('ai-results.sarif', JSON.stringify(sarifData, null, 2));
   console.log("✅ Combined Multi-Tool SARIF report generated successfully as ai-results.sarif");
 
@@ -187,10 +267,9 @@ function generateCombinedSarif(aiResult, sonarIssues) {
       const ruleId = `AI-ARCH-${finding.severity}-${index}`;
       const sarifLevel = finding.severity === 'CRITICAL' ? 'error' : 'warning';
 
-      // ⬇️ THE FIX: Force the line number to be a strict integer ⬇️
       let parsedLineNumber = parseInt(finding.line_number, 10);
       if (isNaN(parsedLineNumber) || parsedLineNumber < 1) {
-        parsedLineNumber = 1; // Fallback to line 1 if the AI provided a string or null
+        parsedLineNumber = 1;
       }
 
       aiRun.tool.driver.rules.push({
@@ -206,8 +285,7 @@ function generateCombinedSarif(aiResult, sonarIssues) {
         locations: [{
           physicalLocation: {
             artifactLocation: { uri: finding.file },
-            // ⬇️ Use the safely parsed integer here ⬇️
-            region: { startLine: parsedLineNumber } 
+            region: { startLine: parsedLineNumber }
           }
         }]
       });
