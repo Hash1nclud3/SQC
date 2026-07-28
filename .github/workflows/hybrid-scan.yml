@@ -14,6 +14,11 @@ on:
           - gemini
           - openai
           - bedrock
+      bedrock_model:
+        description: 'AWS Bedrock Model ID (only used if provider is bedrock)'
+        required: false
+        default: 'anthropic.claude-3-5-sonnet-20240620-v1:0'
+        type: string
       scan_mode:
         description: 'Scan Mode: Diff (PR changes only) or Full (Entire Repository)'
         required: true
@@ -107,6 +112,7 @@ jobs:
         env:
           AI_PROVIDER: ${{ github.event.inputs.ai_provider || 'gemini' }}
           SCAN_MODE: ${{ github.event.inputs.scan_mode || 'full' }} 
+          BEDROCK_MODEL_ID: ${{ github.event.inputs.bedrock_model || 'anthropic.claude-3-5-sonnet-20240620-v1:0' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
