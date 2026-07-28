@@ -5,6 +5,11 @@ on:
     types: [opened, synchronize]
   workflow_dispatch:
     inputs:
+      purge_history:
+        description: '🧹 PURGE HISTORY: Delete previous SonarCloud state and GitHub Security alerts before scanning'
+        required: true
+        type: boolean
+        default: false
       ai_provider:
         description: 'Select the AI Provider to execute architectural validation'
         required: true
@@ -61,17 +66,57 @@ jobs:
         run: npm install @google/genai openai @aws-sdk/client-bedrock-runtime
 
       # ------------------------------------------------------------
+      # OPTIONAL CLEAN SLATE (PURGE SONARCLOUD & GITHUB SECURITY TAB)
+      # ------------------------------------------------------------
+      - name: Master Purge (SonarCloud & Code Scanning History)
+        if: ${{ github.event.inputs.purge_history == 'true' }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧹 Initiating Clean Slate Protocol..."
+          
+          # 1. Purge SonarCloud
+          if [ -f "sonar-project.properties" ]; then
+            PROJECT_KEY=$(awk -F'=' '/^sonar\.projectKey/ {print $2}' sonar-project.properties | tr -d ' \r\n')
+            echo "🗑️ Purging SonarCloud project: $PROJECT_KEY"
+            curl -s -u "$SONAR_TOKEN:" -X POST "https://sonarcloud.io/api/projects/delete?project=$PROJECT_KEY"
+          else
+            echo "⚠️ sonar-project.properties not found! Skipping SonarCloud purge."
+          fi
+
+          # 2. Purge GitHub Code Scanning (CodeQL & AI SARIFs)
+          echo "🗑️ Purging GitHub Code Scanning alerts (CodeQL & AI)..."
+          
+          # Fetch all analyses and filter for the ones marked as "deletable: true"
+          ANALYSIS_IDS=$(gh api -X GET "repos/${{ github.repository }}/code-scanning/analyses?per_page=100" --jq '.[] | select(.deletable==true) | .id' || echo "")
+          
+          if [ -z "$ANALYSIS_IDS" ]; then
+            echo "✅ No GitHub code scanning analyses found to delete."
+          else
+            for id in $ANALYSIS_IDS; do
+              echo "Deleting analysis chain starting at ID: $id"
+              # confirm_delete=true wipes the entire history for the tool configuration
+              gh api -X DELETE "repos/${{ github.repository }}/code-scanning/analyses/$id?confirm_delete=true" --silent || echo "⚠️ Failed to delete $id, moving to next."
+            done
+            echo "✅ GitHub Security Tab successfully wiped."
+          fi
+          
+          echo "✅ Master purge complete! Waiting 5 seconds for backend systems to sync..."
+          sleep 5
+
+      # ------------------------------------------------------------
       # CODEQL - NATIVE GITHUB SAST (Quality Only)
       # ------------------------------------------------------------
       - name: Initialize CodeQL
-        if: ${{ github.event_name == 'pull_request' || inputs.run_codeql == true }}
+        if: ${{ github.event_name == 'pull_request' || inputs.run_codeql == 'true' }}
         uses: github/codeql-action/init@v3
         with:
           languages: javascript
           config-file: ./.github/codeql-config.yml
 
       - name: Perform CodeQL Analysis
-        if: ${{ github.event_name == 'pull_request' || inputs.run_codeql == true }}
+        if: ${{ github.event_name == 'pull_request' || inputs.run_codeql == 'true' }}
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript"
@@ -80,7 +125,7 @@ jobs:
       # SONARCLOUD SCAN (Asynchronous)
       # ------------------------------------------------------------
       - name: SonarCloud Scan
-        if: ${{ github.event_name == 'pull_request' || inputs.run_sonar == true }}
+        if: ${{ github.event_name == 'pull_request' || inputs.run_sonar == 'true' }}
         uses: SonarSource/sonarcloud-github-action@master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
