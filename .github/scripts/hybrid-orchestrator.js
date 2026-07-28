@@ -85,9 +85,7 @@ RAW SAST FINDINGS:
       }
     });
     
-    // ⬇️ Track tokens for the triage phase
     scanMetrics.tokensConsumed += (response.usageMetadata?.totalTokenCount || 0);
-    
     return JSON.parse(response.text.trim());
   } catch (error) {
     console.error("⚠️ AI Triage failed. Skipping deduplication report.", error.message);
@@ -95,23 +93,45 @@ RAW SAST FINDINGS:
   }
 }
 
-function generateTriageMarkdown(clusteredIssues) {
-  if (!clusteredIssues || clusteredIssues.length === 0) return '';
+// ⬇️ NEW TABLE-BASED MARKDOWN GENERATOR ⬇️
+function generateTriageMarkdown(clusteredIssues, aiFindings) {
+  const provider = process.env.AI_PROVIDER || 'gemini';
+  let markdown = `## 🧠 Unified Security Triage Report\n\n`;
+  markdown += `| Vulnerability | Source tool | count | Location(s) |\n`;
+  markdown += `|---|---|---|---|\n`;
 
-  let markdown = `## 🧠 AI Triage Report: Grouped SAST Findings\n\n`;
-  markdown += `Gemini analyzed the raw deterministic scan results and clustered them into the following unique architectural themes:\n\n`;
+  let totalCount = 0;
 
-  clusteredIssues.forEach(cluster => {
-    markdown += `### 🚨 ${cluster.finding_type}\n`;
-    markdown += `**Analysis:** ${cluster.root_cause_summary}\n\n`;
-    markdown += `**Affected Locations (${cluster.instances.length}):**\n`;
-    
-    cluster.instances.forEach(instance => {
-      markdown += `- \`${instance.file}\` (Line ${instance.line})\n`;
+  // 1. Process AI Architect Findings
+  if (aiFindings && aiFindings.length > 0) {
+    const groupedAI = {};
+    aiFindings.forEach(f => {
+      const title = f.title || f.issue || "Architectural Flaw";
+      if (!groupedAI[title]) groupedAI[title] = [];
+      groupedAI[title].push(f);
     });
-    markdown += `\n---\n`;
-  });
 
+    for (const [title, instances] of Object.entries(groupedAI)) {
+      totalCount += instances.length;
+      const locations = instances.map(i => {
+        let line = parseInt(i.line_number, 10);
+        if (isNaN(line) || line < 1) line = 1;
+        return `\`${i.file}\` (Line ${line})`;
+      }).join("<br>");
+      markdown += `| ${title} | AI Architect (${provider}) | ${instances.length} | ${locations} |\n`;
+    }
+  }
+
+  // 2. Process SonarCloud Findings
+  if (clusteredIssues && clusteredIssues.length > 0) {
+    clusteredIssues.forEach(cluster => {
+      totalCount += cluster.instances.length;
+      const locations = cluster.instances.map(i => `\`${i.file}\` (Line ${i.line})`).join("<br>");
+      markdown += `| ${cluster.finding_type} | SonarCloud | ${cluster.instances.length} | ${locations} |\n`;
+    });
+  }
+
+  markdown += `\n**Total vulnerabilities published to Security Tab (via custom SARIF):** ${totalCount}\n`;
   return markdown;
 }
 
@@ -185,8 +205,6 @@ async function run() {
 
     for (const file of files) {
       const content = fs.readFileSync(file, 'utf8');
-      
-      // ⬇️ Collect Metrics for Full Scan
       scanMetrics.linesOfCode += content.split('\n').length;
       const ext = path.extname(file) || 'no-extension';
       scanMetrics.fileTypes[ext] = (scanMetrics.fileTypes[ext] || 0) + 1;
@@ -203,7 +221,6 @@ async function run() {
     payloadData = fs.readFileSync('pr_changes.diff', 'utf8');
     const diffLines = payloadData.split('\n');
     
-    // ⬇️ Collect Metrics for Diff Scan
     scanMetrics.linesOfCode = diffLines.length;
     for (const line of diffLines) {
       if (line.startsWith('+++ b/')) {
@@ -263,7 +280,6 @@ async function callGemini(payloadData, prefix) {
     });
     
     console.log("✅ AI engine successfully returned a response payload.");
-    // Return both the text output and the token count for metrics tracking
     const tokens = response.usageMetadata?.totalTokenCount || 0;
     return { text: response.text, tokens: tokens };
   } catch (error) {
@@ -278,20 +294,21 @@ async function callGemini(payloadData, prefix) {
 async function finalizeAndExit(aiResult) {
   console.log(`AI Verdict: ${aiResult.status} | ${aiResult.summary}`);
   
-  // 1. Fetch raw Sonar issues
   const sonarIssues = await fetchSonarIssues();
   
-  // 2. Generate Summary Reports (Triage + Metrics)
   let finalMarkdown = '';
+  let clusteredIssues = [];
   if (sonarIssues.length > 0) {
-    const clusteredIssues = await clusterSastWithAI(sonarIssues);
-    finalMarkdown += generateTriageMarkdown(clusteredIssues);
+    clusteredIssues = await clusterSastWithAI(sonarIssues);
   }
+  
+  // ⬇️ Pass BOTH Sonar Clusters and AI Findings to the Table Generator
+  finalMarkdown += generateTriageMarkdown(clusteredIssues, aiResult.findings);
   finalMarkdown += generateMetricsMarkdown();
+  
   fs.writeFileSync('ai-triage-report.md', finalMarkdown);
   console.log("✅ Pipeline execution metrics and AI summary generated.");
   
-  // 3. Generate the standard SARIF for the Security Tab
   const sarifData = generateCombinedSarif(aiResult, sonarIssues);
   fs.writeFileSync('ai-results.sarif', JSON.stringify(sarifData, null, 2));
   console.log("✅ Combined Multi-Tool SARIF report generated successfully as ai-results.sarif");
