@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const { GoogleGenAI } = require('@google/genai');
+const OpenAI = require('openai');
+const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 
 const promptPath = path.join(__dirname, 'system-instruction.txt');
 let systemInstruction = "";
@@ -43,9 +45,82 @@ function getAllFiles(dir, fileList = []) {
 }
 
 // ----------------------------------------------------------------------------
+// MULTI-PROVIDER AI ROUTER
+// ----------------------------------------------------------------------------
+async function dispatchAI(systemMsg, userMsg, provider) {
+  console.log(`🧠 Initiating AI request via ${provider.toUpperCase()}...`);
+
+  if (provider === 'openai') {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemMsg },
+        { role: "user", content: userMsg }
+      ]
+    });
+    return {
+      text: response.choices[0].message.content,
+      tokens: response.usage?.total_tokens || 0
+    };
+
+  } else if (provider === 'bedrock') {
+    const client = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
+    
+    // Dynamically grab the model ID from the environment
+    const bedrockModel = process.env.BEDROCK_MODEL_ID || "anthropic.claude-3-5-sonnet-20240620-v1:0";
+    
+    const payload = {
+      anthropic_version: "bedrock-2023-05-31",
+      max_tokens: 8192,
+      system: systemMsg,
+      messages: [
+        { role: "user", content: userMsg }
+      ],
+      temperature: 0.1
+    };
+    
+    const command = new InvokeModelCommand({
+      modelId: bedrockModel,
+      contentType: "application/json",
+      accept: "application/json",
+      body: JSON.stringify(payload)
+    });
+
+    const response = await client.send(command);
+    const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+    const totalTokens = (responseBody.usage?.input_tokens || 0) + (responseBody.usage?.output_tokens || 0);
+    
+    return {
+      text: responseBody.content[0].text,
+      tokens: totalTokens
+    };
+
+  } else {
+    // Default to Gemini
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: [{ role: 'user', parts: [{ text: userMsg }] }],
+      config: {
+        systemInstruction: systemMsg,
+        temperature: 0.1,
+        responseMimeType: "application/json"
+      }
+    });
+    return {
+      text: response.text,
+      tokens: response.usageMetadata?.totalTokenCount || 0
+    };
+  }
+}
+
+// ----------------------------------------------------------------------------
 // AI SAST TRIAGE & DEDUPLICATION
 // ----------------------------------------------------------------------------
-async function clusterSastWithAI(sonarIssues) {
+async function clusterSastWithAI(sonarIssues, provider) {
   if (!sonarIssues || sonarIssues.length === 0) return [];
 
   console.log(`🧠 Sending ${sonarIssues.length} Sonar issues to AI for deduplication...`);
@@ -56,7 +131,7 @@ async function clusterSastWithAI(sonarIssues) {
     line: i.textRange ? i.textRange.startLine : 1
   }));
 
-  const triagePrompt = `You are an expert AppSec triage agent. 
+  const triageSystemMsg = `You are an expert AppSec triage agent. 
 I am providing you with raw SAST findings from deterministic tools. 
 Your job is to reduce alert fatigue by clustering them by unique vulnerability type.
 
@@ -69,40 +144,31 @@ Return a strict JSON array of objects using this exact schema:
       { "file": "string", "line": number }
     ]
   }
-]
+]`;
 
-RAW SAST FINDINGS:
-`;
+  const userMsg = `RAW SAST FINDINGS:\n${JSON.stringify(compactIssues)}`;
 
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: [{ role: 'user', parts: [{ text: `${triagePrompt}${JSON.stringify(compactIssues)}` }] }],
-      config: {
-        temperature: 0.1,
-        responseMimeType: "application/json"
-      }
-    });
-    
-    scanMetrics.tokensConsumed += (response.usageMetadata?.totalTokenCount || 0);
-    return JSON.parse(response.text.trim());
+    const aiResponse = await dispatchAI(triageSystemMsg, userMsg, provider);
+    scanMetrics.tokensConsumed += aiResponse.tokens;
+    return JSON.parse(aiResponse.text.trim());
   } catch (error) {
     console.error("⚠️ AI Triage failed. Skipping deduplication report.", error.message);
     return [];
   }
 }
 
-// ⬇️ NEW TABLE-BASED MARKDOWN GENERATOR ⬇️
-function generateTriageMarkdown(clusteredIssues, aiFindings) {
-  const provider = process.env.AI_PROVIDER || 'gemini';
+// ----------------------------------------------------------------------------
+// TABLE-BASED MARKDOWN GENERATOR
+// ----------------------------------------------------------------------------
+function generateTriageMarkdown(clusteredIssues, aiFindings, provider) {
   let markdown = `## 🧠 Unified Security Triage Report\n\n`;
   markdown += `| Vulnerability | Source tool | count | Location(s) |\n`;
   markdown += `|---|---|---|---|\n`;
 
   let totalCount = 0;
 
-  // 1. Process AI Architect Findings
+  // Process AI Architect Findings
   if (aiFindings && aiFindings.length > 0) {
     const groupedAI = {};
     aiFindings.forEach(f => {
@@ -118,11 +184,11 @@ function generateTriageMarkdown(clusteredIssues, aiFindings) {
         if (isNaN(line) || line < 1) line = 1;
         return `\`${i.file}\` (Line ${line})`;
       }).join("<br>");
-      markdown += `| ${title} | AI Architect (${provider}) | ${instances.length} | ${locations} |\n`;
+      markdown += `| ${title} | AI Architect (${provider.toUpperCase()}) | ${instances.length} | ${locations} |\n`;
     }
   }
 
-  // 2. Process SonarCloud Findings
+  // Process SonarCloud Findings
   if (clusteredIssues && clusteredIssues.length > 0) {
     clusteredIssues.forEach(cluster => {
       totalCount += cluster.instances.length;
@@ -191,7 +257,7 @@ async function fetchSonarIssues() {
 // ----------------------------------------------------------------------------
 async function run() {
   const scanMode = process.env.SCAN_MODE || 'diff';
-  const provider = process.env.AI_PROVIDER || 'gemini';
+  const provider = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
   let payloadData = '';
   let aiPromptPrefix = '';
 
@@ -200,7 +266,7 @@ async function run() {
     const files = getAllFiles('.');
     if (files.length === 0) {
       console.log("⚠️ No matching source files found. Skipping AI scan.");
-      return await finalizeAndExit({ status: "APPROVED", summary: "No source files found to scan.", findings: [] });
+      return await finalizeAndExit({ status: "APPROVED", summary: "No source files found to scan.", findings: [] }, provider);
     }
 
     for (const file of files) {
@@ -215,7 +281,7 @@ async function run() {
   } else {
     if (!fs.existsSync('pr_changes.diff') || fs.statSync('pr_changes.diff').size === 0) {
       console.log("⚠️ No diff payload found. Skipping AI scan.");
-      return await finalizeAndExit({ status: "APPROVED", summary: "No code changes detected in this run.", findings: [] });
+      return await finalizeAndExit({ status: "APPROVED", summary: "No code changes detected in this run.", findings: [] }, provider);
     }
     
     payloadData = fs.readFileSync('pr_changes.diff', 'utf8');
@@ -237,16 +303,13 @@ async function run() {
 
   let rawJsonResult = '';
   try {
-    if (provider === 'gemini') {
-      const aiResponse = await callGemini(payloadData, aiPromptPrefix);
-      rawJsonResult = aiResponse.text;
-      scanMetrics.tokensConsumed += aiResponse.tokens;
-    } else {
-      rawJsonResult = JSON.stringify({ status: "APPROVED", summary: `Mock ${provider} review executed.`, findings: [] });
-    }
+    const aiResponse = await dispatchAI(systemInstruction, `${aiPromptPrefix}${payloadData}`, provider);
+    rawJsonResult = aiResponse.text;
+    scanMetrics.tokensConsumed += aiResponse.tokens;
+    console.log("✅ AI engine successfully returned a response payload.");
   } catch (error) {
-    console.error("❌ AI Execution aborted due to an API error.");
-    return await finalizeAndExit({ status: "BLOCKED", summary: `AI Scan Failed: ${error.message}`, findings: [] });
+    console.error(`❌ ${provider.toUpperCase()} Execution aborted due to an API error:`, error.message);
+    return await finalizeAndExit({ status: "BLOCKED", summary: `AI Scan Failed: ${error.message}`, findings: [] }, provider);
   }
 
   let aiResult;
@@ -256,42 +319,16 @@ async function run() {
   } catch (error) {
     console.error("❌ AI Scan Failed: The AI did not return a valid JSON format.", error.message);
     console.log("Raw AI Output was:\n", rawJsonResult);
-    return await finalizeAndExit({ status: "BLOCKED", summary: "AI failed to return valid JSON payload.", findings: [] });
+    return await finalizeAndExit({ status: "BLOCKED", summary: "AI failed to return valid JSON payload.", findings: [] }, provider);
   }
 
-  await finalizeAndExit(aiResult);
-}
-
-// ----------------------------------------------------------------------------
-// AI PROVIDERS
-// ----------------------------------------------------------------------------
-async function callGemini(payloadData, prefix) {
-  console.log("🧠 Initiating AI scan via Gemini AI Studio API...");
-  try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: [{ role: 'user', parts: [{ text: `${prefix}${payloadData}` }] }],
-      config: {
-        systemInstruction: systemInstruction,
-        temperature: 0.1,
-        responseMimeType: "application/json"
-      }
-    });
-    
-    console.log("✅ AI engine successfully returned a response payload.");
-    const tokens = response.usageMetadata?.totalTokenCount || 0;
-    return { text: response.text, tokens: tokens };
-  } catch (error) {
-    console.error("❌ AI API Request Failed:", error.message);
-    throw error;
-  }
+  await finalizeAndExit(aiResult, provider);
 }
 
 // ----------------------------------------------------------------------------
 // SARIF COMPILATION & OUTPUT
 // ----------------------------------------------------------------------------
-async function finalizeAndExit(aiResult) {
+async function finalizeAndExit(aiResult, provider) {
   console.log(`AI Verdict: ${aiResult.status} | ${aiResult.summary}`);
   
   const sonarIssues = await fetchSonarIssues();
@@ -299,17 +336,16 @@ async function finalizeAndExit(aiResult) {
   let finalMarkdown = '';
   let clusteredIssues = [];
   if (sonarIssues.length > 0) {
-    clusteredIssues = await clusterSastWithAI(sonarIssues);
+    clusteredIssues = await clusterSastWithAI(sonarIssues, provider);
   }
   
-  // ⬇️ Pass BOTH Sonar Clusters and AI Findings to the Table Generator
-  finalMarkdown += generateTriageMarkdown(clusteredIssues, aiResult.findings);
+  finalMarkdown += generateTriageMarkdown(clusteredIssues, aiResult.findings, provider);
   finalMarkdown += generateMetricsMarkdown();
   
   fs.writeFileSync('ai-triage-report.md', finalMarkdown);
   console.log("✅ Pipeline execution metrics and AI summary generated.");
   
-  const sarifData = generateCombinedSarif(aiResult, sonarIssues);
+  const sarifData = generateCombinedSarif(aiResult, sonarIssues, provider);
   fs.writeFileSync('ai-results.sarif', JSON.stringify(sarifData, null, 2));
   console.log("✅ Combined Multi-Tool SARIF report generated successfully as ai-results.sarif");
 
@@ -319,15 +355,13 @@ async function finalizeAndExit(aiResult) {
   }
 }
 
-function generateCombinedSarif(aiResult, sonarIssues) {
-  const providerName = process.env.AI_PROVIDER || 'gemini';
+function generateCombinedSarif(aiResult, sonarIssues, providerName) {
   const sarif = {
     $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
     version: "2.1.0",
     runs: []
   };
 
-  // --- RUN 1: AI ARCHITECT ---
   const aiRun = {
     tool: { driver: { name: `AI Architect Review (${providerName.toUpperCase()})`, rules: [] } },
     results: []
@@ -367,7 +401,6 @@ function generateCombinedSarif(aiResult, sonarIssues) {
   }
   sarif.runs.push(aiRun);
 
-  // --- RUN 2: SONARCLOUD ---
   if (sonarIssues && sonarIssues.length > 0) {
     const sonarRun = {
       tool: { driver: { name: `SonarCloud Extractor`, rules: [] } },
@@ -404,14 +437,12 @@ function generateCombinedSarif(aiResult, sonarIssues) {
   return sarif;
 }
 
-// ----------------------------------------------------------------------------
-// SAFE ERROR CATCHER
-// ----------------------------------------------------------------------------
 run().catch(err => {
   console.error("Fatal Error:", err);
   const errorSarif = generateCombinedSarif(
     { status: "BLOCKED", summary: "Pipeline crashed entirely. Check Actions logs.", findings: [] },
-    []
+    [],
+    process.env.AI_PROVIDER || 'unknown'
   );
   fs.writeFileSync('ai-results.sarif', JSON.stringify(errorSarif, null, 2));
   process.exit(1);
